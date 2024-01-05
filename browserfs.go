@@ -16,8 +16,19 @@ type webHandler struct {}
 
 var wsupgrader = websocket.Upgrader{}
 
+func read_ws(c *websocket.Conn, recvchan chan []byte, closechan chan int) {
+	for {
+		_, message, err := c.ReadMessage()
+		if err != nil {
+			closechan <- 1
+			return
+		}
+		recvchan <- message
+	}
+}
 func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
-	fmt.Println("My uncle")
+	closechan := make(chan int)
+	recvchan := make(chan []byte)
 	fmt.Println(r.URL.Path)
 
 	c, err := wsupgrader.Upgrade(wr, r, nil)
@@ -25,8 +36,25 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
-	msg := []byte("Wordy")
-	c.WriteMessage(websocket.TextMessage, msg)
+	_, message, err := c.ReadMessage()
+	// message *must* be correct publish token for url path
+	// send an 'all clear'
+	go read_ws(c, recvchan, closechan)
+	for {
+		select {
+			case message := <- recvchan:
+				c.WriteMessage(websocket.BinaryMessage, message)
+			case <- closechan:
+				return
+		}
+	}
+	_, message, err := c.ReadMessage()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println(message)
+	//c.WriteMessage(websocket.TextMessage, msg)
 }
 
 func listenWebsock(wp string, exitchan chan int) {

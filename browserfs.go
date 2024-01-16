@@ -246,19 +246,115 @@ func main() {
         os.Exit(0)
     }()
     c, _ := fuse.Mount(*mountdirPtr)
-    fs.Serve(c, browserfs{})
+    thefs := &browserfs{}
+    fs.Serve(c, thefs)
 }
 
 type browserfs struct{}
 
 func (browserfs) Root() (fs.Node, error) {
-    return Dir{}, nil
+    n :=  &Dir{1, nil}
+    return n, nil
 }
 
-type Dir struct{}
+type Dir struct{
+    baseinode uint64
+    pathparts []string
+}
 
-func (Dir) Attr(ctx context.Context, a *fuse.Attr) error {
-    a.Inode = 1
+type File struct{
+    pathparts []string
+    filesize uint64
+}
+
+func (s Dir) Attr(ctx context.Context, a *fuse.Attr) error {
+    a.Inode = s.baseinode
     a.Mode = os.ModeDir | 0o555
     return nil
+}
+
+func (f File) Attr(ctx context.Context, a *fuse.Attr) error {
+    a.Mode = 0o444
+    a.Size = f.filesize
+    return nil
+}
+
+func (s Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
+    fmt.Println(name)
+    fmt.Println(s.pathparts)
+    if len(s.pathparts) == 0 {
+        _, present := mappedfiles[name]
+        if !present {
+            return nil, syscall.ENOENT
+        }
+        pp := make([]string, 1)
+        pp[0] = name
+        child := &Dir{
+            pathparts: pp,
+        }
+        return child, nil
+    }
+    if len(s.pathparts) == 1 {
+        _, present := mappedfiles[s.pathparts[0]]
+        if !present {
+            return nil, syscall.ENOENT
+        }
+        pp := make([]string, 2)
+        pp[1] = name
+        pp[0] = s.pathparts[0]
+        child := &Dir{
+            pathparts: pp,
+        }
+        return child, nil
+    }
+    if len(s.pathparts) == 2 {
+        mf := mappedfiles[s.pathparts[0]][s.pathparts[1]]
+        if mf.filename != name {
+            return nil, syscall.ENOENT
+        }
+        child := &File{
+            pathparts: s.pathparts,
+        }
+        return child, nil
+    }
+    return nil, syscall.ENOENT
+}
+func (s Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+    var curridx uint64
+    var subdirs []fuse.Dirent
+    fmt.Println("Holl")
+    curridx = 0
+    if len(s.pathparts) == 0 {
+        subdirs = make([]fuse.Dirent, len(mappedfiles))
+        var ci fuse.Dirent
+        for k := range mappedfiles{
+            ci = fuse.Dirent{
+                Name: k,
+                Type: fuse.DT_Dir,
+            }
+            subdirs[curridx] = ci
+            curridx += 1
+        }
+    }
+    if len(s.pathparts) == 1 {
+        subdirs = make([]fuse.Dirent, 1)
+        for k := range mappedfiles[s.pathparts[0]] {
+            ci := fuse.Dirent {
+                Name: k,
+                Type: fuse.DT_Dir,
+            }
+            subdirs[0] = ci
+        }
+    }
+    if len(s.pathparts) == 2 {
+        subdirs = make([]fuse.Dirent, 1)
+        mf := mappedfiles[s.pathparts[0]][s.pathparts[1]]
+        ci := fuse.Dirent {
+            Name: mf.filename,
+            Type: fuse.DT_File,
+        }
+        subdirs[0] = ci
+    }
+    fmt.Println(subdirs)
+    return subdirs, nil
 }

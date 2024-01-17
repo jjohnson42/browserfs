@@ -15,6 +15,7 @@ import (
     "net/http"
     "os/signal"
     "strings"
+    "strconv"
     "github.com/gorilla/websocket"
     "syscall"
 )
@@ -29,18 +30,22 @@ type pendingtoken struct {
 type readrq struct {
     offset uint64
     length uint64
+    rspchan chan []byte
 }
 type remfilent struct {
-    filesize int
+    filesize uint64
     subdir string
     filename string
     reqchan chan readrq
-    rspchan chan []byte
 }
 
 
 
-var wsupgrader = websocket.Upgrader{}
+var wsupgrader = websocket.Upgrader{
+    CheckOrigin: func(r *http.Request) bool { // we are being reverse proxied, no idea what origin should be, banking       onbrowser to enforce CORS, like most web applications
+        return true
+    },
+}
 var pendingtoks = make(map[string]pendingtoken)
 var mappedfiles = make(map[string]map[string]remfilent) // first is the browserfs generated token, then controller generated subdir and controller conveyed filename
 
@@ -57,13 +62,18 @@ func read_ws(c *websocket.Conn, recvchan chan []byte, closechan chan int) {
 func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
     closechan := make(chan int)
     recvchan := make(chan []byte)
+    fmt.Println(r.URL.Path)
+    pathparts := strings.Split(r.URL.Path, "/")
     c, err := wsupgrader.Upgrade(wr, r, nil)
     if err != nil {
+        fmt.Println(err)
         return
     }
     defer c.Close()
-    pathparts := strings.Split(r.URL.Path, "/")
     if len(pathparts) != 4 { // leading blank, our id, subdir, and filename
+        fmt.Println("no good")
+        fmt.Println(pathparts)
+        fmt.Println(len(pathparts))
         return
     }
     _, message, err := c.ReadMessage()
@@ -73,10 +83,6 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
         return
     }
     authtoken := string(message)
-    fmt.Println(authtoken)
-    fmt.Println(pendtok.authtoken)
-    fmt.Println(pendtok.subdir)
-    fmt.Println(pendtok)
     if authtoken != pendtok.authtoken {
         fmt.Println("bad auth")
         return
@@ -90,7 +96,10 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
     current.filename = pathparts[3]
     current.subdir = pathparts[2]
     current.reqchan = make(chan readrq)
-    current.rspchan = make(chan []byte)
+    _, message, err = c.ReadMessage()
+    fmt.Println("Second message:")
+    fmt.Println(message)
+    current.filesize, err = strconv.ParseUint(string(message), 10, 64)
     //TODO: current.filesize
     mappedfiles[pathparts[1]][pathparts[2]] = current
     c.WriteMessage(websocket.BinaryMessage, []byte("\x00\x00\x00\x00"))
@@ -101,18 +110,18 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
                 c.WriteMessage(websocket.BinaryMessage, message)  // Not to be used
             case <- closechan:
                 return
-            case readrq := <- mappedfiles[pathparts[1]][pathparts[2]].reqchan:
+            case rrq := <- mappedfiles[pathparts[1]][pathparts[2]].reqchan:
                 outbox := new(bytes.Buffer)
                 binary.Write(outbox, binary.BigEndian, uint32(1)) // read request operator
-                binary.Write(outbox, binary.BigEndian, readrq.offset)
-                binary.Write(outbox, binary.BigEndian, readrq.length)
+                binary.Write(outbox, binary.BigEndian, rrq.offset)
+                binary.Write(outbox, binary.BigEndian, rrq.length)
                 c.WriteMessage(websocket.BinaryMessage, outbox.Bytes())
                 _, rply, err := c.ReadMessage()
                 if err != nil {
                     fmt.Println(err)
                     return
                 }
-                mappedfiles[pathparts[1]][pathparts[2]].rspchan <- rply
+                rrq.rspchan <- rply
         }
     }
 }
@@ -122,8 +131,16 @@ func listenWebsock(wp string, exitchan chan int) {
     srv := &http.Server {
         Handler: sockhandler,
     }
-    //usock, err := net.Listen("unix", wp)
-    usock, err := net.Listen("tcp", ":8080")
+    var err error
+    var usock net.Listener
+    if strings.Contains(wp, ":") {
+        // Between uneven support of unix sockets in apache and SELinux pain,
+        // perhaps TCP is the righht way after all
+        usock, err = net.Listen("tcp", wp)
+    } else {
+        usock, err = net.Listen("unix", wp)
+        os.Chmod(wp, 0o777)
+    }
     if err != nil {
         panic(err)
     }
@@ -219,12 +236,12 @@ func listencontrol(ctlpath string) {
 
 func main() {
     exitchan := make(chan int)
-    mountdirPtr := flag.String("w", "", "Target Working Directory")
+    mountdirPtr := flag.String("w", "", "Target Mount Directory")
     ctlSocketPath := flag.String("c", "", "Path to control socket")
     wsSocketPath := flag.String("s", "", "Path to websocket socket")
     flag.Parse()
     if (*mountdirPtr == "") {
-        fmt.Println("Must specify directory")
+        fmt.Println("Must specify mount directory")
         os.Exit(1)
     }
     if (*ctlSocketPath == "") {
@@ -243,6 +260,7 @@ func main() {
         <-rmchan
         os.Remove(*ctlSocketPath)
         os.Remove(*wsSocketPath)
+        fuse.Unmount(*mountdirPtr)
         os.Exit(0)
     }()
     c, _ := fuse.Mount(*mountdirPtr)
@@ -265,6 +283,7 @@ type Dir struct{
 type File struct{
     pathparts []string
     filesize uint64
+    filent remfilent
 }
 
 func (s Dir) Attr(ctx context.Context, a *fuse.Attr) error {
@@ -279,9 +298,29 @@ func (f File) Attr(ctx context.Context, a *fuse.Attr) error {
     return nil
 }
 
+func (f File) Open(ctx context.Context, req *fuse.OpenRequest, rsp *fuse.OpenResponse) (fs.Handle, error) {
+    if !req.Flags.IsReadOnly() {
+        return nil, fuse.Errno(syscall.EACCES)
+    }
+    return f, nil
+}
+
+func (f File) Read(ctx context.Context, req *fuse.ReadRequest, rsp *fuse.ReadResponse) error {
+    fmt.Println(req.Offset)
+    fmt.Println(req.Size)
+    rrq := readrq{
+        offset: uint64(req.Offset),
+        length: uint64(req.Size),
+        rspchan: make(chan []byte),
+    }
+    f.filent.reqchan <- rrq
+    rspdata := <- rrq.rspchan
+    rsp.Data = rspdata
+    return nil
+}
+
+
 func (s Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
-    fmt.Println(name)
-    fmt.Println(s.pathparts)
     if len(s.pathparts) == 0 {
         _, present := mappedfiles[name]
         if !present {
@@ -314,6 +353,8 @@ func (s Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
         }
         child := &File{
             pathparts: s.pathparts,
+            filesize: mf.filesize,
+            filent: mf,
         }
         return child, nil
     }
@@ -322,7 +363,6 @@ func (s Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 func (s Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
     var curridx uint64
     var subdirs []fuse.Dirent
-    fmt.Println("Holl")
     curridx = 0
     if len(s.pathparts) == 0 {
         subdirs = make([]fuse.Dirent, len(mappedfiles))
@@ -355,6 +395,5 @@ func (s Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
         }
         subdirs[0] = ci
     }
-    fmt.Println(subdirs)
     return subdirs, nil
 }

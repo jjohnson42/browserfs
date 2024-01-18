@@ -15,7 +15,6 @@ import (
     "net/http"
     "os/signal"
     "strings"
-    "strconv"
     "github.com/gorilla/websocket"
     "syscall"
 )
@@ -99,11 +98,14 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
     _, message, err = c.ReadMessage()
     fmt.Println("Second message:")
     fmt.Println(message)
-    current.filesize, err = strconv.ParseUint(string(message), 10, 64)
+    bbuf := bytes.NewBuffer(message)
+    binary.Read(bbuf, binary.BigEndian, &current.filesize)
+    fmt.Println(current.filesize)
+    //current.filesize, err = strconv.ParseUint(string(message), 10, 64)
     //TODO: current.filesize
     mappedfiles[pathparts[1]][pathparts[2]] = current
     c.WriteMessage(websocket.BinaryMessage, []byte("\x00\x00\x00\x00"))
-    go read_ws(c, recvchan, closechan)
+    //go read_ws(c, recvchan, closechan)
     for {
         select {
             case message := <- recvchan:
@@ -118,6 +120,7 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
                 c.WriteMessage(websocket.BinaryMessage, outbox.Bytes())
                 _, rply, err := c.ReadMessage()
                 if err != nil {
+		    fmt.Println("Ugh")
                     fmt.Println(err)
                     return
                 }
@@ -306,8 +309,6 @@ func (f File) Open(ctx context.Context, req *fuse.OpenRequest, rsp *fuse.OpenRes
 }
 
 func (f File) Read(ctx context.Context, req *fuse.ReadRequest, rsp *fuse.ReadResponse) error {
-    fmt.Println(req.Offset)
-    fmt.Println(req.Size)
     rrq := readrq{
         offset: uint64(req.Offset),
         length: uint64(req.Size),
@@ -360,6 +361,7 @@ func (s Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
     }
     return nil, syscall.ENOENT
 }
+
 func (s Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
     var curridx uint64
     var subdirs []fuse.Dirent

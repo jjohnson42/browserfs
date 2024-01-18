@@ -1,26 +1,32 @@
 package main
 
 import (
-    "crypto/rand"
-    "encoding/binary"
-    "encoding/hex"
-    "bytes"
-    "context"
-    "os"
-    "flag"
-    "fmt"
-    "bazil.org/fuse"
-    "bazil.org/fuse/fs"
-    "net"
-    "net/http"
-    "os/signal"
-    "strings"
-    "github.com/gorilla/websocket"
-    "syscall"
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
+	"flag"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+
+	"bazil.org/fuse"
+	"bazil.org/fuse/fs"
+	"github.com/gorilla/websocket"
 )
 
 type webHandler struct {}
 
+type readrsp struct {
+    data []byte
+    err error
+}
 type pendingtoken struct {
     authtoken string
     subdir string
@@ -29,7 +35,8 @@ type pendingtoken struct {
 type readrq struct {
     offset uint64
     length uint64
-    rspchan chan []byte
+    rspchan chan readrsp
+    txid uint32
 }
 type remfilent struct {
     filesize uint64
@@ -45,17 +52,41 @@ var wsupgrader = websocket.Upgrader{
         return true
     },
 }
+var pendingiolock = sync.RWMutex{}
+var pendingios = make(map[uint32]readrq)
 var pendingtoks = make(map[string]pendingtoken)
 var mappedfiles = make(map[string]map[string]remfilent) // first is the browserfs generated token, then controller generated subdir and controller conveyed filename
 
 func read_ws(c *websocket.Conn, recvchan chan []byte, closechan chan int) {
     for {
-        _, message, err := c.ReadMessage()
+        _, rply, err := c.ReadMessage()
         if err != nil {
-            closechan <- 1
+            fmt.Println("Error receiving client message")
+            fmt.Println(err)
             return
         }
-        recvchan <- message
+        bbuf := bytes.NewBuffer(rply)
+        var opcode uint32 = 0
+        binary.Read(bbuf, binary.BigEndian, &opcode)
+        if opcode == 2 {
+            // Read response opcode
+            var txid uint32
+            binary.Read(bbuf, binary.BigEndian, &txid)
+            pendingiolock.RLock()
+            rrq, validtx := pendingios[txid]
+            pendingiolock.RUnlock()
+            if ! validtx {
+                fmt.Println("Invalid txid in response!")
+                continue
+            }
+            rrq.rspchan <- readrsp{
+                err: nil,
+                data: rply[8:],
+            }
+            pendingiolock.Lock()
+            delete(pendingios, txid)
+            pendingiolock.Unlock()
+        }
     }
 }
 func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
@@ -86,11 +117,12 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
         fmt.Println("bad auth")
         return
     }
+    pendingiolock.Lock()
     delete(pendingtoks, pathparts[1])
     if _, keypresent := mappedfiles[pathparts[1]]; !keypresent {
         mappedfiles[pathparts[1]] = make(map[string]remfilent)
     }
-    mappedfiles[pathparts[1]][pathparts[2]] = remfilent{}
+    pendingiolock.Unlock()
     current := remfilent{}
     current.filename = pathparts[3]
     current.subdir = pathparts[2]
@@ -103,9 +135,11 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
     fmt.Println(current.filesize)
     //current.filesize, err = strconv.ParseUint(string(message), 10, 64)
     //TODO: current.filesize
+    pendingiolock.Lock()
     mappedfiles[pathparts[1]][pathparts[2]] = current
+    pendingiolock.Unlock()
     c.WriteMessage(websocket.BinaryMessage, []byte("\x00\x00\x00\x00"))
-    //go read_ws(c, recvchan, closechan)
+    go read_ws(c, recvchan, closechan)
     for {
         select {
             case message := <- recvchan:
@@ -115,16 +149,11 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
             case rrq := <- mappedfiles[pathparts[1]][pathparts[2]].reqchan:
                 outbox := new(bytes.Buffer)
                 binary.Write(outbox, binary.BigEndian, uint32(1)) // read request operator
+                binary.Write(outbox, binary.BigEndian, uint32(rrq.txid))
                 binary.Write(outbox, binary.BigEndian, rrq.offset)
                 binary.Write(outbox, binary.BigEndian, rrq.length)
                 c.WriteMessage(websocket.BinaryMessage, outbox.Bytes())
-                _, rply, err := c.ReadMessage()
-                if err != nil {
-		    fmt.Println("Ugh")
-                    fmt.Println(err)
-                    return
-                }
-                rrq.rspchan <- rply
+
         }
     }
 }
@@ -266,7 +295,7 @@ func main() {
         fuse.Unmount(*mountdirPtr)
         os.Exit(0)
     }()
-    c, _ := fuse.Mount(*mountdirPtr)
+    c, _ := fuse.Mount(*mountdirPtr, fuse.MaxReadahead(256*1024), fuse.FSName("browserfs"), fuse.ReadOnly(), fuse.AsyncRead())
     thefs := &browserfs{}
     fs.Serve(c, thefs)
 }
@@ -309,14 +338,29 @@ func (f File) Open(ctx context.Context, req *fuse.OpenRequest, rsp *fuse.OpenRes
 }
 
 func (f File) Read(ctx context.Context, req *fuse.ReadRequest, rsp *fuse.ReadResponse) error {
+    var txid uint32 = 0
+    var txidused bool = true
+    pendingiolock.RLock()
+    for txidused == true {
+        txid += 1
+        _, txidused = pendingios[txid]
+    }
+    pendingiolock.RUnlock()
     rrq := readrq{
         offset: uint64(req.Offset),
         length: uint64(req.Size),
-        rspchan: make(chan []byte),
+        rspchan: make(chan readrsp),
+        txid: txid,
     }
+    pendingiolock.Lock()
+    pendingios[txid] = rrq
+    pendingiolock.Unlock()
     f.filent.reqchan <- rrq
     rspdata := <- rrq.rspchan
-    rsp.Data = rspdata
+    if rspdata.err != nil {
+        return fuse.Errno(syscall.EACCES)
+    }
+    rsp.Data = rspdata.data
     return nil
 }
 

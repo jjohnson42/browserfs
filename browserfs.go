@@ -43,6 +43,7 @@ type remfilent struct {
     subdir string
     filename string
     reqchan chan readrq
+    alertchan chan int
 }
 
 
@@ -63,6 +64,7 @@ func read_ws(c *websocket.Conn, recvchan chan []byte, closechan chan int) {
         if err != nil {
             fmt.Println("Error receiving client message")
             fmt.Println(err)
+            closechan <- 1
             return
         }
         bbuf := bytes.NewBuffer(rply)
@@ -90,6 +92,8 @@ func read_ws(c *websocket.Conn, recvchan chan []byte, closechan chan int) {
     }
 }
 func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
+    var current remfilent
+    filemapped := false
     closechan := make(chan int)
     recvchan := make(chan []byte)
     fmt.Println(r.URL.Path)
@@ -99,7 +103,18 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
         fmt.Println(err)
         return
     }
-    defer c.Close()
+    defer func() {
+        fmt.Println("Closing out connection")
+        if filemapped {
+            fmt.Println("Should be closing file")
+            pendingiolock.Lock()
+            delete(mappedfiles[pathparts[1]], pathparts[2])
+            delete(mappedfiles, pathparts[1])
+            pendingiolock.Unlock()
+            current.alertchan <- 1
+        }
+        c.Close()
+    }()
     if len(pathparts) != 4 { // leading blank, our id, subdir, and filename
         fmt.Println("no good")
         fmt.Println(pathparts)
@@ -123,10 +138,12 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
         mappedfiles[pathparts[1]] = make(map[string]remfilent)
     }
     pendingiolock.Unlock()
-    current := remfilent{}
+    current = remfilent{}
+    current.alertchan = make(chan int)
     current.filename = pathparts[3]
     current.subdir = pathparts[2]
     current.reqchan = make(chan readrq)
+    filemapped = true
     _, message, err = c.ReadMessage()
     fmt.Println("Second message:")
     fmt.Println(message)
@@ -356,12 +373,16 @@ func (f File) Read(ctx context.Context, req *fuse.ReadRequest, rsp *fuse.ReadRes
     pendingios[txid] = rrq
     pendingiolock.Unlock()
     f.filent.reqchan <- rrq
-    rspdata := <- rrq.rspchan
-    if rspdata.err != nil {
-        return fuse.Errno(syscall.EACCES)
+    select {
+        case rspdata := <- rrq.rspchan:
+            if rspdata.err != nil {
+                return fuse.Errno(syscall.EACCES)
+            }
+            rsp.Data = rspdata.data
+            return nil
+        case <- f.filent.alertchan:
+            return fuse.Errno(syscall.ENOENT)
     }
-    rsp.Data = rspdata.data
-    return nil
 }
 
 

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bazil.org/fuse"
-	"bazil.org/fuse/fs"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -11,7 +9,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/gorilla/websocket"
 	lamerand "math/rand"
 	"net"
 	"net/http"
@@ -20,6 +17,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
+
+	"bazil.org/fuse"
+	"bazil.org/fuse/fs"
+	"github.com/gorilla/websocket"
 )
 
 type webHandler struct{}
@@ -183,7 +185,10 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
 			binary.Write(outbox, binary.BigEndian, rrq.offset)
 			binary.Write(outbox, binary.BigEndian, rrq.length)
 			c.WriteMessage(websocket.BinaryMessage, outbox.Bytes())
-
+		case <-time.After(time.Second * 30):
+			outbox := new(bytes.Buffer)
+			binary.Write(outbox, binary.BigEndian, uint32(3)) // NOOP
+			c.WriteMessage(websocket.BinaryMessage, outbox.Bytes())
 		}
 	}
 }

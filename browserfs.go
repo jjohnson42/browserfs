@@ -65,8 +65,8 @@ func read_ws(c *websocket.Conn, recvchan chan []byte, closechan chan int) {
 	for {
 		_, rply, err := c.ReadMessage()
 		if err != nil {
-			fmt.Println("Error receiving client message")
-			fmt.Println(err)
+			//fmt.Println("Error receiving client message")
+			//fmt.Println(err)
 			closechan <- 1
 			return
 		}
@@ -107,15 +107,15 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
 	pathparts := strings.Split(r.URL.Path, "/")
 	c, err := wsupgrader.Upgrade(wr, r, nil)
 	if err != nil {
-		fmt.Println(err)
+		//fmt.Println(err)
 		return
 	}
 	defer func() {
-		fmt.Println("Closing out connection")
+		//fmt.Println("Closing out connection")
 		current.closed = true
 
 		if filemapped {
-			fmt.Println("Closing file")
+			//fmt.Println("Closing file")
 			pendingiolock.Lock()
 			delete(mappedfiles[pathparts[1]], pathparts[2])
 			delete(mappedfiles, pathparts[1])
@@ -357,7 +357,7 @@ func (s Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (f File) Attr(ctx context.Context, a *fuse.Attr) error {
-	fmt.Println("attr called")
+	//fmt.Println("attr called")
 	if f.filent.closed {
 		return fuse.Errno(syscall.ENOENT)
 	}

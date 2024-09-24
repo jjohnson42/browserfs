@@ -1,0 +1,33 @@
+Name:		confluent-browserfs
+Version:	#VERSION#
+%define fversion %{lua:
+sv, _ = string.gsub("#VERSION#", "[~+]", "-")
+print(sv)
+}
+Release:	1
+Summary:	FUSE filesystem for confluent WebUI access to client file
+Group:		Applications/System
+License:	Apache
+Source:		confluent-browserfs.tar
+%global source_date_epoch_from_changelog 0
+%global debug_package %{nil}
+
+%description
+Confluent browserfs allows browser to publish a file such that it appears as a file on the webui host
+without that file having to be uploaded fully in advance.  This provides a more immediate feedback and
+guidance to allow steering an import, and doesn't require staging the OS contents ahead of time.
+
+%prep
+%setup -n browserfs
+go get browserfs
+
+%build
+go build -ldflags "-s -w -linkmode=external"
+#go build
+
+%install
+mkdir -p %{buildroot}/opt/confluent/bin/
+cp browserfs  %{buildroot}/opt/confluent/bin/
+
+%files
+/opt/confluent/bin/browserfs

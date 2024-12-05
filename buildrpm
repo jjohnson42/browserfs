@@ -1,4 +1,5 @@
-cd ..;tar cvf /home/jjohnson2/rpmbuild/SOURCES/confluent-browserfs.tar browserfs; cd -
+cd $(dirname $0)
+cd ..;tar cvf ~/rpmbuild/SOURCES/confluent-browserfs.tar browserfs; cd -
 VERSION=`git describe|cut -d- -f 1`
 NUMCOMMITS=`git describe|cut -d- -f 2`
 if [ "$NUMCOMMITS" != "$VERSION"  ]; then
@@ -11,7 +12,7 @@ fi
 sed -e s/#VERSION#/$VERSION/ browserfs.spec.tmpl  > browserfs.spec
 rm ~/rpmbuild/RPMS/*/confluent-browserfs*
 rpmbuild -ba browserfs.spec
-cp ~/rpmbuild/RPMS/*/confluent-browserfs* .
+mv ~/rpmbuild/RPMS/*/confluent-browserfs* .
 
 
 

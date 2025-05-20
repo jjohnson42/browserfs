@@ -1,13 +1,13 @@
 module browserfs
 
-go 1.22.0
+go 1.23.0
+
+toolchain go1.24.3
+
+require github.com/gorilla/websocket v1.5.3
 
 require (
-	bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5
-	github.com/gorilla/websocket v1.5.3
-)
-
-require (
-	golang.org/x/net v0.32.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	github.com/anacrolix/fuse v0.3.1 // indirect
+	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
 )

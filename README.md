@@ -22,3 +22,7 @@ Control socket:
     -full pathname (token/user/file.ext)
     -file publish token
 -Close file, request is full pathname
+
+
+https://github.com/jacobsa/fuse - seems to be more active
+https://github.com/anacrolix/fuse - more compatible?

@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/anacrolix/fuse"
-	"github.com/anacrolix/fuse/fs"
+	"bazil.org/fuse"
+	"bazil.org/fuse/fs"
 	"github.com/gorilla/websocket"
 )
 

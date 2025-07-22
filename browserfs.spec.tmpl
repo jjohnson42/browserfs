@@ -25,7 +25,12 @@ go get browserfs
 
 %build
 #go build -ldflags "-s -w -linkmode=external"
-CGO_ENABLED=0 go build
+%ifarch aarch64
+env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build
+%endif
+%ifarch x86_64
+env CGO_ENABLED=0 go build
+%endif
 
 %install
 mkdir -p %{buildroot}/opt/confluent/bin/

@@ -19,9 +19,9 @@ import (
 	"syscall"
 	"time"
 
-	"bazil.org/fuse"
-	"bazil.org/fuse/fs"
 	"github.com/gorilla/websocket"
+	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 type webHandler struct{}
@@ -319,68 +319,77 @@ func main() {
 	go listenWebsock(*wsSocketPath, exitchan)
 	rmchan := make(chan os.Signal, 1)
 	signal.Notify(rmchan, os.Interrupt, syscall.SIGTERM)
+	root := &Dir{}
+	opts := &fs.Options{}
+	opts.MountOptions.Name = "browserfs"
+	opts.MountOptions.FsName = "browserfs"
+	opts.MountOptions.MaxReadAhead = 1024 * 1024
+	opts.MountOptions.Options = append(opts.MountOptions.Options, "ro")
+	server, err := fs.Mount(*mountdirPtr, root, opts)
+	if err != nil {
+		panic(err)
+	}
 	go func() {
 		<-rmchan
 		os.Remove(*ctlSocketPath)
 		os.Remove(*wsSocketPath)
-		fuse.Unmount(*mountdirPtr)
+		server.Unmount()
 		os.Exit(0)
 	}()
-	c, _ := fuse.Mount(*mountdirPtr, fuse.MaxReadahead(256*1024), fuse.FSName("browserfs"), fuse.ReadOnly(), fuse.AsyncRead())
-	thefs := &browserfs{}
-	fs.Serve(c, thefs)
-}
-
-type browserfs struct{}
-
-func (browserfs) Root() (fs.Node, error) {
-	n := &Dir{1, nil}
-	return n, nil
+	server.Wait()
 }
 
 type Dir struct {
-	baseinode uint64
+	fs.Inode
 	pathparts []string
 }
 
 type File struct {
+	fs.Inode
 	pathparts []string
 	filesize  uint64
 	filent    *remfilent
 	mydir     *Dir
 }
 
-func (s Dir) Attr(ctx context.Context, a *fuse.Attr) error {
-	a.Inode = s.baseinode
-	a.Mode = os.ModeDir | 0o555
-	return nil
+var _ = (fs.NodeGetattrer)((*Dir)(nil))
+var _ = (fs.NodeLookuper)((*Dir)(nil))
+var _ = (fs.NodeReaddirer)((*Dir)(nil))
+
+var _ = (fs.NodeGetattrer)((*File)(nil))
+var _ = (fs.NodeOpener)((*File)(nil))
+var _ = (fs.NodeReader)((*File)(nil))
+
+func (s *Dir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	out.Mode = fuse.S_IFDIR | 0o555
+	return 0
 }
 
-func (f File) Attr(ctx context.Context, a *fuse.Attr) error {
+func (f *File) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	//fmt.Println("attr called")
 	if f.filent.closed {
-		return fuse.Errno(syscall.ENOENT)
+		return syscall.ENOENT
 	}
-	a.Mode = 0o444
-	a.Size = f.filesize
-	return nil
+	out.Mode = fuse.S_IFREG | 0o444
+	out.Size = f.filesize
+	return 0
 }
 
-func (f File) Open(ctx context.Context, req *fuse.OpenRequest, rsp *fuse.OpenResponse) (fs.Handle, error) {
+func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if f.filent.closed {
-		return nil, fuse.Errno(syscall.ENOENT)
+		return nil, 0, syscall.ENOENT
 	}
-	if !req.Flags.IsReadOnly() {
-		return nil, fuse.Errno(syscall.EACCES)
+	if int(flags)&syscall.O_ACCMODE != syscall.O_RDONLY {
+		return nil, 0, syscall.EACCES
 	}
-	return f, nil
+	return nil, 0, 0
 }
 
-func (f File) Read(ctx context.Context, req *fuse.ReadRequest, rsp *fuse.ReadResponse) error {
+func (f *File) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	var txid uint32 = 0
 	var txidused bool = true
 	if f.filent.closed {
-		return fuse.Errno(syscall.ENOENT)
+		return nil, syscall.ENOENT
 	}
 	pendingiolock.RLock()
 	for txidused == true {
@@ -389,8 +398,8 @@ func (f File) Read(ctx context.Context, req *fuse.ReadRequest, rsp *fuse.ReadRes
 	}
 	pendingiolock.RUnlock()
 	rrq := readrq{
-		offset:  uint64(req.Offset),
-		length:  uint64(req.Size),
+		offset:  uint64(off),
+		length:  uint64(len(dest)),
 		rspchan: make(chan readrsp),
 		relfile: f.filent,
 		txid:    txid,
@@ -402,13 +411,12 @@ func (f File) Read(ctx context.Context, req *fuse.ReadRequest, rsp *fuse.ReadRes
 	f.filent.reqchan <- rrq
 	rspdata := <-rrq.rspchan
 	if rspdata.err != nil {
-		return fuse.Errno(syscall.ENOENT)
+		return nil, syscall.ENOENT
 	}
-	rsp.Data = rspdata.data
-	return nil
+	return fuse.ReadResultData(rspdata.data), 0
 }
 
-func (s Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
+func (s *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	if len(s.pathparts) == 0 {
 		_, present := mappedfiles[name]
 		if !present {
@@ -419,7 +427,7 @@ func (s Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 		child := &Dir{
 			pathparts: pp,
 		}
-		return child, nil
+		return s.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFDIR}), 0
 	}
 	if len(s.pathparts) == 1 {
 		_, present := mappedfiles[s.pathparts[0]]
@@ -432,7 +440,7 @@ func (s Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 		child := &Dir{
 			pathparts: pp,
 		}
-		return child, nil
+		return s.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFDIR}), 0
 	}
 	if len(s.pathparts) == 2 {
 		mf := mappedfiles[s.pathparts[0]][s.pathparts[1]]
@@ -444,45 +452,35 @@ func (s Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 			filesize:  mf.filesize,
 			filent:    mf,
 		}
-		return child, nil
+		return s.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFREG}), 0
 	}
 	return nil, syscall.ENOENT
 }
 
-func (s Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	var curridx uint64
-	var subdirs []fuse.Dirent
-	curridx = 0
+func (s *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	var entries []fuse.DirEntry
 	if len(s.pathparts) == 0 {
-		subdirs = make([]fuse.Dirent, len(mappedfiles))
-		var ci fuse.Dirent
 		for k := range mappedfiles {
-			ci = fuse.Dirent{
+			entries = append(entries, fuse.DirEntry{
 				Name: k,
-				Type: fuse.DT_Dir,
-			}
-			subdirs[curridx] = ci
-			curridx += 1
+				Mode: fuse.S_IFDIR,
+			})
 		}
 	}
 	if len(s.pathparts) == 1 {
-		subdirs = make([]fuse.Dirent, 1)
 		for k := range mappedfiles[s.pathparts[0]] {
-			ci := fuse.Dirent{
+			entries = append(entries, fuse.DirEntry{
 				Name: k,
-				Type: fuse.DT_Dir,
-			}
-			subdirs[0] = ci
+				Mode: fuse.S_IFDIR,
+			})
 		}
 	}
 	if len(s.pathparts) == 2 {
-		subdirs = make([]fuse.Dirent, 1)
 		mf := mappedfiles[s.pathparts[0]][s.pathparts[1]]
-		ci := fuse.Dirent{
+		entries = append(entries, fuse.DirEntry{
 			Name: mf.filename,
-			Type: fuse.DT_File,
-		}
-		subdirs[0] = ci
+			Mode: fuse.S_IFREG,
+		})
 	}
-	return subdirs, nil
+	return fs.NewListDirStream(entries), 0
 }

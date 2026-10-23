@@ -70,13 +70,16 @@ func read_ws(c *websocket.Conn, recvchan chan []byte, closechan chan int) {
 			closechan <- 1
 			return
 		}
-		bbuf := bytes.NewBuffer(rply)
-		var opcode uint32 = 0
-		binary.Read(bbuf, binary.BigEndian, &opcode)
+		if len(rply) < 4 {
+			continue
+		}
+		opcode := binary.BigEndian.Uint32(rply[:4])
 		if opcode == 2 {
 			// Read response opcode
-			var txid uint32
-			binary.Read(bbuf, binary.BigEndian, &txid)
+			if len(rply) < 8 {
+				continue
+			}
+			txid := binary.BigEndian.Uint32(rply[4:8])
 			pendingiolock.RLock()
 			rrq, validtx := pendingios[txid]
 			pendingiolock.RUnlock()
@@ -163,8 +166,9 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
 	current.reqchan = make(chan readrq)
 	filemapped = true
 	_, message, err = c.ReadMessage()
-	bbuf := bytes.NewBuffer(message)
-	binary.Read(bbuf, binary.BigEndian, &current.filesize)
+	if len(message) >= 8 {
+		current.filesize = binary.BigEndian.Uint64(message[:8])
+	}
 	//current.filesize, err = strconv.ParseUint(string(message), 10, 64)
 	//TODO: current.filesize
 	pendingiolock.Lock()
@@ -181,16 +185,16 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
 		case <-closechan:
 			return
 		case rrq := <-mappedfiles[pathparts[1]][pathparts[2]].reqchan:
-			outbox := new(bytes.Buffer)
-			binary.Write(outbox, binary.BigEndian, uint32(1)) // read request operator
-			binary.Write(outbox, binary.BigEndian, uint32(rrq.txid))
-			binary.Write(outbox, binary.BigEndian, rrq.offset)
-			binary.Write(outbox, binary.BigEndian, rrq.length)
-			c.WriteMessage(websocket.BinaryMessage, outbox.Bytes())
+			var outbox [24]byte
+			binary.BigEndian.PutUint32(outbox[0:4], 1) // read request operator
+			binary.BigEndian.PutUint32(outbox[4:8], rrq.txid)
+			binary.BigEndian.PutUint64(outbox[8:16], rrq.offset)
+			binary.BigEndian.PutUint64(outbox[16:24], rrq.length)
+			c.WriteMessage(websocket.BinaryMessage, outbox[:])
 		case <-keepalive.C:
-			outbox := new(bytes.Buffer)
-			binary.Write(outbox, binary.BigEndian, uint32(3)) // NOOP
-			c.WriteMessage(websocket.BinaryMessage, outbox.Bytes())
+			var outbox [4]byte
+			binary.BigEndian.PutUint32(outbox[:], 3) // NOOP
+			c.WriteMessage(websocket.BinaryMessage, outbox[:])
 		}
 		if !keepalive.Stop() {
 			select {

@@ -3,6 +3,8 @@ export class BrowserFS {
     ws: Websocket
     wrappedfile: File
     readcallback: Function
+    activity = false
+    activityTimer: ReturnType<typeof setTimeout>
 
     constructor(pathname: string, pubfile: File, authtoken: string, activitycallback: Function) {
         this.mountready = new Promise((resolve, reject) => {
@@ -32,21 +34,31 @@ export class BrowserFS {
         var dvw = new DataView(req.data)
         let opcode = dvw.getUint32()
         if (opcode == 1) {
-            if (this.readcallback) {
-                this.readcallback(false)
-            }
-            let txid = Number(dvw.getUint32(4))
-            let offset = Number(dvw.getBigUint64(8))
-            let sz = Number(dvw.getBigUint64(16))
-            let chnk = this.wrappedfile.slice(offset, offset + sz)
-            let rsp = new ArrayBuffer(8)
-            dvw = new DataView(rsp)
-            dvw.setUint32(0, 2)
-            dvw.setUint32(4, txid)
-            const rspblob = new Blob([rsp, chnk])
-            this.ws.send(rspblob)            
-            if (this.readcallback) {
-                this.readcallback(true)
+            try {
+                if (!this.activity) {
+                    this.activity = true
+                    if (this.readcallback) {
+                        this.readcallback(false)
+                    }
+                }
+                let txid = Number(dvw.getUint32(4))
+                let offset = Number(dvw.getBigUint64(8))
+                let sz = Number(dvw.getBigUint64(16))
+                let chnk = this.wrappedfile.slice(offset, offset + sz)
+                let rsp = new ArrayBuffer(8)
+                dvw = new DataView(rsp)
+                dvw.setUint32(0, 2)
+                dvw.setUint32(4, txid)
+                const rspblob = new Blob([rsp, chnk])
+                this.ws.send(rspblob)
+            } finally {
+                clearTimeout(this.activityTimer)
+                this.activityTimer = setTimeout(() => {
+                    this.activity = false
+                    if (this.readcallback) {
+                        this.readcallback(true)
+                    }
+                }, 250)
             }
         }
     }

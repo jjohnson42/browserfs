@@ -143,7 +143,9 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, message, err := c.ReadMessage()
+	pendingiolock.RLock()
 	pendtok, tokexists := pendingtoks[pathparts[1]]
+	pendingiolock.RUnlock()
 	if !tokexists {
 		fmt.Println("no token registered")
 		return
@@ -184,7 +186,7 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
 			c.WriteMessage(websocket.BinaryMessage, message) // Not to be used
 		case <-closechan:
 			return
-		case rrq := <-mappedfiles[pathparts[1]][pathparts[2]].reqchan:
+		case rrq := <-current.reqchan:
 			var outbox [24]byte
 			binary.BigEndian.PutUint32(outbox[0:4], 1) // read request operator
 			binary.BigEndian.PutUint32(outbox[4:8], rrq.txid)
@@ -272,6 +274,7 @@ func handlectlreq(conn net.Conn) {
 		ptok.filename = string(fname)
 		fileid := make([]byte, 16)
 		var idstr string
+		pendingiolock.Lock()
 		for {
 			rand.Read(fileid) // randomly generate a fileid
 			idstr = hex.EncodeToString(fileid)
@@ -287,6 +290,7 @@ func handlectlreq(conn net.Conn) {
 		rand.Read(authtok)                                  // random auth token
 		ptok.authtoken = hex.EncodeToString(authtok) + "\n" // newline for sake of manual debug being a bit easier
 		pendingtoks[idstr] = &ptok
+		pendingiolock.Unlock()
 		conn.Write([]byte("\x00\x00\x00\x00")) // 0 for success
 		binary.Write(conn, binary.BigEndian, uint32(len(idstr)))
 		conn.Write([]byte(idstr))
@@ -431,6 +435,8 @@ func (f *File) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int6
 }
 
 func (s *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	pendingiolock.RLock()
+	defer pendingiolock.RUnlock()
 	if len(s.pathparts) == 0 {
 		_, present := mappedfiles[name]
 		if !present {
@@ -444,8 +450,7 @@ func (s *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 		return s.NewInode(ctx, child, fs.StableAttr{Mode: fuse.S_IFDIR}), 0
 	}
 	if len(s.pathparts) == 1 {
-		_, present := mappedfiles[s.pathparts[0]]
-		if !present {
+		if mappedfiles[s.pathparts[0]][name] == nil {
 			return nil, syscall.ENOENT
 		}
 		pp := make([]string, 2)
@@ -458,7 +463,7 @@ func (s *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 	}
 	if len(s.pathparts) == 2 {
 		mf := mappedfiles[s.pathparts[0]][s.pathparts[1]]
-		if mf.filename != name {
+		if mf == nil || mf.filename != name {
 			return nil, syscall.ENOENT
 		}
 		child := &File{
@@ -472,6 +477,8 @@ func (s *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 }
 
 func (s *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	pendingiolock.RLock()
+	defer pendingiolock.RUnlock()
 	var entries []fuse.DirEntry
 	if len(s.pathparts) == 0 {
 		for k := range mappedfiles {
@@ -482,7 +489,11 @@ func (s *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		}
 	}
 	if len(s.pathparts) == 1 {
-		for k := range mappedfiles[s.pathparts[0]] {
+		files, present := mappedfiles[s.pathparts[0]]
+		if !present {
+			return nil, syscall.ENOENT
+		}
+		for k := range files {
 			entries = append(entries, fuse.DirEntry{
 				Name: k,
 				Mode: fuse.S_IFDIR,
@@ -491,6 +502,9 @@ func (s *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	}
 	if len(s.pathparts) == 2 {
 		mf := mappedfiles[s.pathparts[0]][s.pathparts[1]]
+		if mf == nil {
+			return nil, syscall.ENOENT
+		}
 		entries = append(entries, fuse.DirEntry{
 			Name: mf.filename,
 			Mode: fuse.S_IFREG,

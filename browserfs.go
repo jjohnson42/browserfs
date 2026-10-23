@@ -337,6 +337,7 @@ func main() {
 	opts.MountOptions.Name = "browserfs"
 	opts.MountOptions.FsName = "browserfs"
 	opts.MountOptions.MaxReadAhead = 1024 * 1024
+	opts.MountOptions.MaxWrite = 1024 * 1024
 	opts.MountOptions.Options = append(opts.MountOptions.Options, "ro")
 	server, err := fs.Mount(*mountdirPtr, root, opts)
 	if err != nil {

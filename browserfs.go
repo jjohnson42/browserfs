@@ -172,6 +172,8 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
 	pendingiolock.Unlock()
 	c.WriteMessage(websocket.BinaryMessage, []byte("\x00\x00\x00\x00"))
 	go read_ws(c, recvchan, closechan)
+	keepalive := time.NewTimer(30 * time.Second)
+	defer keepalive.Stop()
 	for {
 		select {
 		case message := <-recvchan:
@@ -185,11 +187,18 @@ func (w *webHandler) ServeHTTP(wr http.ResponseWriter, r *http.Request) {
 			binary.Write(outbox, binary.BigEndian, rrq.offset)
 			binary.Write(outbox, binary.BigEndian, rrq.length)
 			c.WriteMessage(websocket.BinaryMessage, outbox.Bytes())
-		case <-time.After(time.Second * 30):
+		case <-keepalive.C:
 			outbox := new(bytes.Buffer)
 			binary.Write(outbox, binary.BigEndian, uint32(3)) // NOOP
 			c.WriteMessage(websocket.BinaryMessage, outbox.Bytes())
 		}
+		if !keepalive.Stop() {
+			select {
+			case <-keepalive.C:
+			default:
+			}
+		}
+		keepalive.Reset(30 * time.Second)
 	}
 }
 
